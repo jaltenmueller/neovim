@@ -34,6 +34,10 @@ int state_sb_clear(void *user);
 void print_color(const VTermColor *col);
 int screen_sb_pushline(int cols, const VTermScreenCell *cells, void *user);
 int screen_sb_popline(int cols, VTermScreenCell *cells, void *user);
+int screen_sb_pushline_ex(int cols, const VTermScreenCell *cells,
+                          const VTermLineInfo *lineinfo, void *user);
+int screen_sb_popline_ex(int cols, VTermScreenCell *cells,
+                         VTermLineInfo *lineinfo, int *cols_out, void *user);
 int screen_sb_clear(void *user);
 void term_output(const char *s, size_t len, void *user);
 int vterm_state_get_penattr(const VTermState *state, VTermAttr attr, VTermValue *val);

@@ -1383,6 +1383,13 @@ bool op_yank(oparg_T *oap, bool message)
 
   yankreg_T *reg = get_yank_register(oap->regname, YREG_YANK);
   op_yank_reg(oap, message, reg, is_append_register(oap->regname));
+
+  // For terminal buffers, merge soft-wrapped continuation lines in the register
+  // so that yanking gives the original logical line content.
+  if (curbuf->terminal) {
+    terminal_yank_merge(curbuf->terminal, reg, oap->start.lnum);
+  }
+
   set_clipboard(oap->regname, reg);
   do_autocmd_textyankpost(oap, reg);
   return true;

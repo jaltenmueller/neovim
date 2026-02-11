@@ -125,6 +125,11 @@ function Gcc:init_defines()
   self:define('_GNU_SOURCE')
   self:define('UNIT_TESTING')
   self:define('UNIT_TESTING_LUA_PREPROCESSING')
+  -- LuaJIT ffi parses preprocessed declarations, not full C11/C23 syntax.
+  -- Strip static assertions from imported headers so newer core headers keep
+  -- working in unit tests.
+  self:define('_Static_assert', { 'COND', 'MSG' }, '')
+  self:define('static_assert', { 'COND', 'MSG' }, '')
   -- Needed for FreeBSD
   self:define('_Thread_local', nil, '')
   -- Needed for macOS Sierra

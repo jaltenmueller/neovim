@@ -89,6 +89,7 @@
 #include "nvim/option_vars.h"
 #include "nvim/optionstr.h"
 #include "nvim/pos_defs.h"
+#include "nvim/register_defs.h"
 #include "nvim/state.h"
 #include "nvim/state_defs.h"
 #include "nvim/strings.h"
@@ -126,6 +127,8 @@ typedef struct {
   OptInt save_w_p_siso;
 } TerminalState;
 
+typedef struct ScrollbackLine ScrollbackLine;
+
 #include "terminal.c.generated.h"
 
 // Delay for refreshing the terminal buffer after receiving updates from
@@ -138,10 +141,11 @@ typedef struct {
 static TimeWatcher refresh_timer;
 static bool refresh_pending = false;
 
-typedef struct {
+struct ScrollbackLine {
   size_t cols;
+  bool continuation;  // true if this row is a soft-wrap continuation of the previous
   VTermScreenCell cells[];
-} ScrollbackLine;
+};
 
 struct terminal {
   TerminalOptions opts;  // options passed to terminal_alloc()
@@ -221,9 +225,11 @@ static VTermScreenCallbacks vterm_screen_callbacks = {
   .settermprop = term_settermprop,
   .bell = term_bell,
   .theme = term_theme,
-  .sb_pushline = term_sb_push,  // Called before a line goes offscreen.
+  .sb_pushline = NULL,
   .sb_popline = term_sb_pop,
   .sb_clear = term_sb_clear,
+  .sb_pushline_ex = term_sb_push_ex,
+  .sb_popline_ex = term_sb_pop_ex,
 };
 
 static VTermSelectionCallbacks vterm_selection_callbacks = {
@@ -1692,11 +1698,12 @@ static int term_theme(bool *dark, void *data)
   return 1;
 }
 
-/// Scrollback push handler: called just before a line goes offscreen (and libvterm will forget it),
-/// giving us a chance to store it.
+/// Scrollback push handler (extended): called just before a line goes offscreen (and libvterm will
+/// forget it), giving us a chance to store it. Includes lineinfo for continuation tracking.
 ///
 /// Code adapted from pangoterm.
-static int term_sb_push(int cols, const VTermScreenCell *cells, void *data)
+static int term_sb_push_ex(int cols, const VTermScreenCell *cells,
+                           const VTermLineInfo *lineinfo, void *data)
 {
   Terminal *term = data;
 
@@ -1730,6 +1737,8 @@ static int term_sb_push(int cols, const VTermScreenCell *cells, void *data)
     sbrow = xmalloc(sizeof(ScrollbackLine) + c * sizeof(sbrow->cells[0]));
     sbrow->cols = c;
   }
+
+  sbrow->continuation = lineinfo ? lineinfo->continuation : false;
 
   // New row is added at the start of the storage buffer.
   term->sb_buffer[0] = sbrow;
@@ -1779,14 +1788,65 @@ static int term_sb_pop(int cols, VTermScreenCell *cells, void *data)
   // copy to vterm state
   memcpy(cells, sbrow->cells, sizeof(cells[0]) * cols_to_copy);
   for (size_t col = cols_to_copy; col < (size_t)cols; col++) {
-    cells[col].schar = 0;
-    cells[col].width = 1;
+    cells[col] = (VTermScreenCell) {
+      .width = 1,
+      .fg = { .type = VTERM_COLOR_DEFAULT_FG },
+      .bg = { .type = VTERM_COLOR_DEFAULT_BG },
+    };
   }
 
   xfree(sbrow);
   if (!term->synchronized_output) {
     set_put(ptr_t, &invalidated_terminals, term);
   }
+
+  return 1;
+}
+
+/// Extended scrollback pop handler that also returns lineinfo (continuation flag).
+static int term_sb_pop_ex(int cols, VTermScreenCell *cells,
+                          VTermLineInfo *lineinfo, int *cols_out, void *data)
+{
+  Terminal *term = data;
+
+  if (!term->sb_current) {
+    return 0;
+  }
+
+  if (term->sb_pending > 0) {
+    term->sb_pending--;
+  }
+
+  ScrollbackLine *sbrow = term->sb_buffer[0];
+  term->sb_current--;
+  // Forget the "popped" row by shifting the rest onto it.
+  memmove(term->sb_buffer, term->sb_buffer + 1,
+          sizeof(term->sb_buffer[0]) * (term->sb_current));
+
+  size_t cols_to_copy = MIN((size_t)cols, sbrow->cols);
+
+  if (cols_out) {
+    *cols_out = (int)sbrow->cols;
+  }
+
+  // copy to vterm state
+  memcpy(cells, sbrow->cells, sizeof(cells[0]) * cols_to_copy);
+  for (size_t col = cols_to_copy; col < (size_t)cols; col++) {
+    cells[col] = (VTermScreenCell) {
+      .width = 1,
+      .fg = { .type = VTERM_COLOR_DEFAULT_FG },
+      .bg = { .type = VTERM_COLOR_DEFAULT_BG },
+    };
+  }
+
+  // Return the stored continuation flag
+  if (lineinfo) {
+    *lineinfo = (VTermLineInfo){ 0 };
+    lineinfo->continuation = sbrow->continuation ? 1 : 0;
+  }
+
+  xfree(sbrow);
+  set_put(ptr_t, &invalidated_terminals, term);
 
   return 1;
 }
@@ -2366,6 +2426,324 @@ static bool fetch_cell(Terminal *term, int row, int col, VTermScreenCell *cell)
   return true;
 }
 
+/// Returns true if the given vterm row is a continuation of the previous row (soft wrap).
+/// @param row  Negative = scrollback index (-1 is most recent), non-negative = on-screen row.
+static bool row_is_continuation(Terminal *term, int row)
+{
+  if (row < 0) {
+    int sb_idx = -row - 1;
+    if (sb_idx < (int)term->sb_current) {
+      return term->sb_buffer[sb_idx]->continuation;
+    }
+    return false;
+  }
+  VTermState *state = vterm_obtain_state(term->vt);
+  const VTermLineInfo *info = vterm_state_get_lineinfo(state, row);
+  return info && info->continuation;
+}
+
+/// Returns the number of display columns from this row that belong to its
+/// logical line. Continuation rows contribute their full stored width, while
+/// the last row of a logical line is trimmed to its last non-blank cell.
+static int terminal_row_cols(Terminal *term, int row, int width, int height)
+{
+  int max_cols = width;
+  if (row < 0) {
+    ScrollbackLine *sbrow = term->sb_buffer[-row - 1];
+    max_cols = (int)sbrow->cols;
+  }
+
+  if (row + 1 < height && row_is_continuation(term, row + 1)) {
+    return max_cols;
+  }
+
+  int col = 0;
+  int last = 0;
+  while (col < max_cols) {
+    VTermScreenCell cell;
+    fetch_cell(term, row, col, &cell);
+    int cell_width = MAX(cell.width, 1);
+    if (cell.schar) {
+      last = col + cell_width;
+    }
+    col += cell_width;
+  }
+
+  return last;
+}
+
+static int scrollback_row_cols(const ScrollbackLine *sbrow, bool next_is_continuation)
+{
+  if (next_is_continuation) {
+    return (int)sbrow->cols;
+  }
+
+  int col = 0;
+  int last = 0;
+  while (col < (int)sbrow->cols) {
+    VTermScreenCell cell = sbrow->cells[col];
+    int cell_width = MAX(cell.width, 1);
+    if (cell.schar) {
+      last = col + cell_width;
+    }
+    col += cell_width;
+  }
+
+  return last;
+}
+
+/// Reflow the stored scrollback rows to the current terminal width.
+///
+/// libvterm reflows the visible screen during resize, but rows that remain
+/// entirely in scrollback can otherwise keep stale widths across multiple
+/// resizes. Normalizing the stored scrollback first keeps later pop/reflow
+/// operations from treating old row padding as real content.
+static void reflow_scrollback_storage(Terminal *term, int width)
+{
+  if (width <= 0 || term->sb_current == 0) {
+    return;
+  }
+
+  size_t rebuilt_cap = MAX(term->sb_current, (size_t)1);
+  size_t rebuilt_count = 0;
+  ScrollbackLine **rebuilt = xmalloc(sizeof(*rebuilt) * rebuilt_cap);
+
+  for (size_t oldest = term->sb_current; oldest > 0; ) {
+    oldest--;
+    size_t newest = oldest;
+    while (newest > 0 && term->sb_buffer[newest - 1]->continuation) {
+      newest--;
+    }
+
+    size_t total_width = 0;
+    for (size_t idx = oldest + 1; idx-- > newest; ) {
+      bool next_is_continuation = idx > newest && term->sb_buffer[idx - 1]->continuation;
+      total_width += (size_t)scrollback_row_cols(term->sb_buffer[idx], next_is_continuation);
+      if (idx == newest) {
+        break;
+      }
+    }
+
+    VTermScreenCell *flat = total_width > 0 ? xmalloc(sizeof(*flat) * total_width) : NULL;
+    size_t flat_off = 0;
+    for (size_t idx = oldest + 1; idx-- > newest; ) {
+      bool next_is_continuation = idx > newest && term->sb_buffer[idx - 1]->continuation;
+      int row_cols = scrollback_row_cols(term->sb_buffer[idx], next_is_continuation);
+      if (row_cols > 0) {
+        memcpy(&flat[flat_off], term->sb_buffer[idx]->cells, (size_t)row_cols * sizeof(*flat));
+      }
+      flat_off += (size_t)row_cols;
+      if (idx == newest) {
+        break;
+      }
+    }
+
+    int new_height = total_width > 0 ? (int)((total_width + (size_t)width - 1) / (size_t)width) : 1;
+    bool first_row_continuation = term->sb_buffer[oldest]->continuation;
+    flat_off = 0;
+
+    for (int row = 0; row < new_height; row++) {
+      if (rebuilt_count == rebuilt_cap) {
+        rebuilt_cap *= 2;
+        rebuilt = xrealloc(rebuilt, sizeof(*rebuilt) * rebuilt_cap);
+      }
+
+      ScrollbackLine *sbrow = xmalloc(sizeof(*sbrow) + (size_t)width * sizeof(sbrow->cells[0]));
+      sbrow->cols = (size_t)width;
+      sbrow->continuation = row > 0 || (row == 0 && first_row_continuation);
+
+      int count = 0;
+      if (total_width > flat_off) {
+        size_t remaining = total_width - flat_off;
+        count = (int)MIN(remaining, (size_t)width);
+      }
+
+      if (count > 0) {
+        memcpy(sbrow->cells, &flat[flat_off], (size_t)count * sizeof(sbrow->cells[0]));
+      }
+      for (int col = count; col < width; col++) {
+        sbrow->cells[col] = (VTermScreenCell) {
+          .width = 1,
+          .fg = { .type = VTERM_COLOR_DEFAULT_FG },
+          .bg = { .type = VTERM_COLOR_DEFAULT_BG },
+        };
+      }
+
+      rebuilt[rebuilt_count++] = sbrow;
+      flat_off += (size_t)count;
+    }
+
+    xfree(flat);
+
+    if (newest == 0) {
+      break;
+    }
+    oldest = newest;
+  }
+
+  for (size_t i = 0; i < term->sb_current; i++) {
+    xfree(term->sb_buffer[i]);
+  }
+
+  size_t drop = rebuilt_count > term->sb_size ? rebuilt_count - term->sb_size : 0;
+  for (size_t i = 0; i < drop; i++) {
+    xfree(rebuilt[i]);
+  }
+  if (drop > 0) {
+    term->sb_deleted += drop;
+  }
+
+  size_t kept = rebuilt_count - drop;
+  for (size_t i = 0; i < kept; i++) {
+    term->sb_buffer[i] = rebuilt[rebuilt_count - 1 - i];
+  }
+  term->sb_current = kept;
+
+  xfree(rebuilt);
+}
+
+/// Fetch a complete logical line by merging consecutive continuation rows.
+/// For all rows except the last in the logical line, the full width is preserved
+/// (no trailing-space trimming) to maintain content across soft wraps.
+/// For the last row, trailing spaces are trimmed.
+///
+/// @param term       Terminal instance.
+/// @param start_row  First row of the logical line (negative=scrollback, non-negative=screen).
+/// @param width      Terminal width (columns per row).
+/// @param height     Terminal height (number of screen rows).
+/// @param[out] out_buf       Pointer to the resulting string (NUL-terminated).
+/// @param[out] out_allocated True if the caller must xfree(*out_buf).
+/// @return Number of vterm rows consumed.
+static int fetch_logical_line(Terminal *term, int start_row, int width, int height,
+                              char **out_buf, bool *out_allocated)
+{
+  // Determine how many rows this logical line spans.
+  int rows_consumed = 1;
+  {
+    int r = start_row + 1;
+    while (r < height && row_is_continuation(term, r)) {
+      rows_consumed++;
+      r++;
+    }
+  }
+
+  // Estimate max size: rows_consumed * width * MAX_SCHAR_SIZE (at most 32 bytes per char).
+  size_t estimated = (size_t)rows_consumed * (size_t)width * 32 + 1;
+  char *buf;
+  bool allocated;
+
+  if (estimated <= TEXTBUF_SIZE) {
+    buf = term->textbuf;
+    allocated = false;
+  } else {
+    buf = xmalloc(estimated);
+    allocated = true;
+  }
+
+  char *ptr = buf;
+  size_t line_len = 0;
+
+  for (int i = 0; i < rows_consumed; i++) {
+    int row = start_row + i;
+    bool is_last_row = (i == rows_consumed - 1);
+    int col = 0;
+
+    while (col < width) {
+      VTermScreenCell cell;
+      fetch_cell(term, row, col, &cell);
+      if (cell.schar) {
+        schar_get_adv(&ptr, cell.schar);
+        if (is_last_row) {
+          // Only track non-trailing content on last row for trimming
+          line_len = (size_t)(ptr - buf);
+        }
+      } else {
+        *ptr++ = ' ';
+      }
+      col += cell.width;
+    }
+
+    if (!is_last_row) {
+      // For non-last rows, include the full row content (no trimming).
+      line_len = (size_t)(ptr - buf);
+    }
+  }
+
+  buf[line_len] = NUL;
+  *out_buf = buf;
+  *out_allocated = allocated;
+  return rows_consumed;
+}
+
+/// Post-process a yanked register from a terminal buffer: merge lines that correspond
+/// to soft-wrapped (continuation) vterm rows into single logical lines.
+///
+/// @param term       Terminal instance.
+/// @param reg        Yank register to modify.
+/// @param start_lnum First buffer line number that was yanked (1-indexed).
+void terminal_yank_merge(Terminal *term, yankreg_T *reg, linenr_T start_lnum)
+{
+  if (reg->y_size <= 1) {
+    return;
+  }
+
+  int height, width;
+  vterm_get_size(term->vt, &height, &width);
+
+  // Build a new array with merged lines.
+  String *new_array = xmalloc(sizeof(String) * reg->y_size);
+  size_t new_size = 0;
+
+  size_t i = 0;
+  while (i < reg->y_size) {
+    linenr_T lnum = start_lnum + (linenr_T)i;
+    int row = lnum - (int)term->sb_current - 1;
+
+    // Check how many subsequent lines are continuations.
+    size_t group_end = i + 1;
+    while (group_end < reg->y_size) {
+      linenr_T next_lnum = start_lnum + (linenr_T)group_end;
+      int next_row = next_lnum - (int)term->sb_current - 1;
+      if (row_is_continuation(term, next_row)) {
+        group_end++;
+      } else {
+        break;
+      }
+    }
+
+    if (group_end == i + 1) {
+      // No continuation: keep the line as-is.
+      new_array[new_size++] = reg->y_array[i];
+      i++;
+    } else {
+      // Merge this group using fetch_logical_line for correct content
+      // (non-last rows keep trailing spaces for proper soft-wrap merging).
+      char *merged;
+      bool allocated;
+      fetch_logical_line(term, row, width, height, &merged, &allocated);
+
+      size_t merged_len = strlen(merged);
+      char *owned;
+      if (allocated) {
+        owned = merged;
+      } else {
+        owned = xmemdupz(merged, merged_len);
+      }
+      new_array[new_size++] = (String){ .data = owned, .size = merged_len };
+
+      // Free the original individual strings.
+      for (size_t j = i; j < group_end; j++) {
+        xfree(reg->y_array[j].data);
+      }
+      i = group_end;
+    }
+  }
+
+  xfree(reg->y_array);
+  reg->y_array = new_array;
+  reg->y_size = new_size;
+}
+
 // queue a terminal instance for refresh
 static void invalidate_terminal(Terminal *term, int start_row, int end_row)
 {
@@ -2405,8 +2783,15 @@ static void refresh_terminal(Terminal *term)
   linenr_T ml_before = buf->b_ml.ml_line_count;
 
   bool resized = refresh_size(term, buf);
-  refresh_scrollback(term, buf);
-  refresh_screen(term, buf);
+  if (resized && !term->in_altscreen) {
+    int width, height;
+    vterm_get_size(term->vt, &height, &width);
+    reflow_scrollback_storage(term, width);
+    refresh_buffer(term, buf);
+  } else {
+    refresh_scrollback(term, buf);
+    refresh_screen(term, buf);
+  }
 
   int ml_added = buf->b_ml.ml_line_count - ml_before;
   adjust_topline_cursor(term, buf, ml_added);
@@ -2515,6 +2900,138 @@ static bool refresh_size(Terminal *term, buf_T *buf)
   term->invalid_end = height;
   term->opts.resize_cb((uint16_t)width, (uint16_t)height, term->opts.data);
   return true;
+}
+
+/// Rebuild the terminal buffer from the canonical vterm state.
+///
+/// Resize-triggered reflow can rewrite existing scrollback rows in-place, so
+/// the incremental scrollback mirror is no longer authoritative. Rebuild the
+/// buffer from scrollback + screen state after the resize instead of trying to
+/// replay row deltas.
+static void refresh_buffer(Terminal *term, buf_T *buf)
+{
+  int width, height;
+  vterm_get_size(term->vt, &height, &width);
+
+  assert(term->sb_current <= (size_t)(INT_MAX - height));
+
+  linenr_T old_line_count = buf->b_ml.ml_line_count;
+  linenr_T deleted = (linenr_T)(term->sb_deleted - term->old_sb_deleted);
+  deleted = MIN(deleted, old_line_count);
+  if (deleted > 0) {
+    mark_adjust_buf(buf, 1, deleted, MAXLNUM, -deleted, true, kMarkAdjustTerm, kExtmarkUndo);
+  }
+
+  size_t row_cap = (size_t)MAX(width, 1) * 32 + 1;
+  char *rowbuf = row_cap <= TEXTBUF_SIZE ? term->textbuf : xmalloc(row_cap);
+
+  linenr_T lnum = 1;
+  for (int row = -(int)term->sb_current; row < height; ) {
+    int line_end = row;
+    while (line_end + 1 < height && row_is_continuation(term, line_end + 1)) {
+      line_end++;
+    }
+
+    char *ptr = rowbuf;
+    size_t row_len = 0;
+    size_t last_nonblank = 0;
+    int row_cols = 0;
+    bool emitted = false;
+
+    for (int src_row = row; src_row <= line_end; src_row++) {
+      int src_cols = terminal_row_cols(term, src_row, width, height);
+      int src_col = 0;
+
+      while (src_col < src_cols) {
+        VTermScreenCell cell;
+        fetch_cell(term, src_row, src_col, &cell);
+        int cell_width = MAX(cell.width, 1);
+
+        if (row_cols > 0 && row_cols + cell_width > width) {
+          rowbuf[row_len] = NUL;
+          if (lnum <= old_line_count) {
+            ml_replace_buf(buf, lnum, rowbuf, true, false);
+          } else {
+            ml_append_buf(buf, lnum - 1, rowbuf, 0, false);
+          }
+          lnum++;
+          emitted = true;
+          ptr = rowbuf;
+          row_len = 0;
+          last_nonblank = 0;
+          row_cols = 0;
+        }
+
+        if (cell.schar) {
+          schar_get_adv(&ptr, cell.schar);
+          row_len = (size_t)(ptr - rowbuf);
+          last_nonblank = row_len;
+        } else {
+          *ptr++ = ' ';
+          row_len = (size_t)(ptr - rowbuf);
+        }
+
+        row_cols += cell_width;
+        src_col += cell_width;
+
+        if (row_cols == width) {
+          rowbuf[row_len] = NUL;
+          if (lnum <= old_line_count) {
+            ml_replace_buf(buf, lnum, rowbuf, true, false);
+          } else {
+            ml_append_buf(buf, lnum - 1, rowbuf, 0, false);
+          }
+          lnum++;
+          emitted = true;
+          ptr = rowbuf;
+          row_len = 0;
+          last_nonblank = 0;
+          row_cols = 0;
+        }
+      }
+    }
+
+    if (row_cols > 0 || !emitted) {
+      rowbuf[last_nonblank] = NUL;
+      if (lnum <= old_line_count) {
+        ml_replace_buf(buf, lnum, rowbuf, true, false);
+      } else {
+        ml_append_buf(buf, lnum - 1, rowbuf, 0, false);
+      }
+      lnum++;
+    }
+
+    row = line_end + 1;
+  }
+
+  linenr_T new_line_count = lnum - 1;
+  if (new_line_count > old_line_count) {
+    appended_lines_buf(buf, old_line_count, new_line_count - old_line_count);
+  } else if (new_line_count < old_line_count) {
+    linenr_T tail_deleted = old_line_count - new_line_count;
+    linenr_T delete_lnum = new_line_count + 1;
+    mark_adjust_buf(buf, delete_lnum, old_line_count, MAXLNUM, -tail_deleted, true, kMarkAdjustTerm,
+                    kExtmarkUndo);
+    while (buf->b_ml.ml_line_count > new_line_count) {
+      ml_delete_buf(buf, buf->b_ml.ml_line_count, false);
+    }
+    deleted_lines_buf(buf, delete_lnum, tail_deleted);
+  }
+
+  linenr_T common_lines = MIN(old_line_count, new_line_count);
+  if (common_lines > 0) {
+    changed_lines(buf, 1, 0, common_lines + 1, 0, true);
+  }
+
+  if (rowbuf != term->textbuf) {
+    xfree(rowbuf);
+  }
+
+  term->old_height = height;
+  term->sb_pending = 0;
+  term->old_sb_deleted = term->sb_deleted;
+  term->invalid_start = INT_MAX;
+  term->invalid_end = -1;
 }
 
 void on_scrollback_option_changed(Terminal *term)

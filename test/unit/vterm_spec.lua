@@ -35,7 +35,9 @@ local bit = require('bit')
 --- @field schar_get fun(any, any):integer
 --- @field screen_sb_clear function
 --- @field screen_sb_popline function
+--- @field screen_sb_popline_ex function
 --- @field screen_sb_pushline function
+--- @field screen_sb_pushline_ex function
 --- @field selection_query function
 --- @field selection_set function
 --- @field state_erase function
@@ -240,6 +242,8 @@ local function wantscreen(vt, opts)
   screen_cbs['settermprop'] = vterm.state_settermprop
   screen_cbs['sb_pushline'] = vterm.screen_sb_pushline
   screen_cbs['sb_popline'] = vterm.screen_sb_popline
+  screen_cbs['sb_pushline_ex'] = vterm.screen_sb_pushline_ex
+  screen_cbs['sb_popline_ex'] = vterm.screen_sb_popline_ex
   screen_cbs['sb_clear'] = vterm.screen_sb_clear
 
   vterm.vterm_screen_set_callbacks(screen, screen_cbs, nil)
@@ -3494,7 +3498,7 @@ putglyph 1f3f4,200d,2620,fe0f 2 0,4]])
     )
     cursor(0, 0, state)
 
-    -- Resize taller attempts to pop scrollback
+    -- Resize taller adds blank rows at bottom (scrollback pop tested separately)
     reset(state, screen)
     screen = wantscreen(vt)
     resize(25, 80, vt)
@@ -3502,14 +3506,10 @@ putglyph 1f3f4,200d,2620,fe0f 2 0,4]])
     screen_row(0, 'Line 1', screen)
     screen_row(24, 'Bottom', screen)
     cursor(14, 0, state)
-    screen = wantscreen(vt, { b = true })
     resize(30, 80, vt)
-    expect('sb_popline 80\nsb_popline 80\nsb_popline 80\nsb_popline 80\nsb_popline 80')
-    screen_row(0, 'ABCDE', screen)
-    screen_row(5, 'Line 1', screen)
-    screen_row(29, 'Bottom', screen)
-    cursor(19, 0, state)
-    screen = wantscreen(vt)
+    screen_row(0, 'Line 1', screen)
+    screen_row(24, 'Bottom', screen)
+    cursor(14, 0, state)
 
     -- Resize can operate on altscreen
     reset(state, screen)
@@ -3721,14 +3721,12 @@ putglyph 1f3f4,200d,2620,fe0f 2 0,4]])
     cursor(1, 2, state)
     resize(5, 15, vt)
     screen_row(0, 'AAAAAAAAAAAA', screen, vt.cols)
-    -- TODO(dundargoc): fix
-    -- screen_row(1, '', screen, vt.cols)
+    screen_row(1, '', screen, vt.cols)
     lineinfo(1, {}, state)
     cursor(0, 12, state)
     resize(5, 20, vt)
     screen_row(0, 'AAAAAAAAAAAA', screen, vt.cols)
-    -- TODO(dundargoc): fix
-    -- screen_row( 1 ,'',screen, vt.cols)
+    screen_row(1, '', screen, vt.cols)
     lineinfo(1, {}, state)
     cursor(0, 12, state)
 
@@ -3737,13 +3735,11 @@ putglyph 1f3f4,200d,2620,fe0f 2 0,4]])
     resize(5, 10, vt)
     push('ABCDEFGHI', vt)
     screen_row(0, 'ABCDEFGHI', screen, vt.cols)
-    -- TODO(dundargoc): fix
-    -- screen_row( 1 , "",screen, vt.cols)
+    screen_row(1, '', screen, vt.cols)
     lineinfo(1, {}, state)
     cursor(0, 9, state)
     resize(5, 8, vt)
-    -- TODO(dundargoc): fix
-    -- screen_row( 0 , "ABCDEFGH",screen,vt.cols)
+    screen_row(0, 'ABCDEFGH', screen, vt.cols)
     screen_row(1, 'I', screen, vt.cols)
     lineinfo(1, { cont = true }, state)
     cursor(1, 1, state)
@@ -3758,8 +3754,7 @@ putglyph 1f3f4,200d,2620,fe0f 2 0,4]])
     resize(5, 10, vt)
     push('PROMPT GOES HERE\r\n> \r\n\r\nPROMPT GOES HERE\r\n> ', vt)
     screen_row(0, '> ', screen, vt.cols)
-    -- TODO(dundargoc): fix
-    -- screen_row( 1 , "",screen,vt.cols)
+    screen_row(1, '', screen, vt.cols)
     screen_row(2, 'PROMPT GOE', screen, vt.cols)
     screen_row(3, 'S HERE', screen, vt.cols)
     lineinfo(3, { cont = true }, state)
@@ -3767,8 +3762,7 @@ putglyph 1f3f4,200d,2620,fe0f 2 0,4]])
     cursor(4, 2, state)
     resize(5, 11, vt)
     screen_row(0, '> ', screen, vt.cols)
-    -- TODO(dundargoc): fix
-    -- screen_row( 1 , "",screen,vt.cols)
+    screen_row(1, '', screen, vt.cols)
     screen_row(2, 'PROMPT GOES', screen, vt.cols)
     screen_row(3, ' HERE', screen, vt.cols)
     lineinfo(3, { cont = true }, state)
@@ -3776,8 +3770,7 @@ putglyph 1f3f4,200d,2620,fe0f 2 0,4]])
     cursor(4, 2, state)
     resize(5, 12, vt)
     screen_row(0, '> ', screen, vt.cols)
-    -- TODO(dundargoc): fix
-    -- screen_row( 1 , "",screen,vt.cols)
+    screen_row(1, '', screen, vt.cols)
     screen_row(2, 'PROMPT GOES ', screen, vt.cols)
     screen_row(3, 'HERE', screen, vt.cols)
     lineinfo(3, { cont = true }, state)
@@ -3785,9 +3778,8 @@ putglyph 1f3f4,200d,2620,fe0f 2 0,4]])
     cursor(4, 2, state)
     resize(5, 16, vt)
     screen_row(0, '> ', screen, vt.cols)
-    -- TODO(dundargoc): fix
-    -- screen_row( 1 , "",screen,vt.cols)
-    -- screen_row( 2 , "PROMPT GOES HERE",screen,vt.cols)
+    screen_row(1, '', screen, vt.cols)
+    screen_row(2, 'PROMPT GOES HERE', screen, vt.cols)
     lineinfo(3, {}, state)
     screen_row(3, '> ', screen, vt.cols)
     cursor(3, 2, state)
@@ -3822,6 +3814,253 @@ putglyph 1f3f4,200d,2620,fe0f 2 0,4]])
     cursor(1, 1, state)
 
     resize(5, 10, vt)
+  end)
+
+  itp('resize narrower rewraps long line and preserves content', function()
+    local vt = init()
+    resize(3, 20, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    -- "1 2 3 4 5 6 7 8 9 10 11 12" = 26 chars, wraps to 2 rows at 20 cols
+    push('1 2 3 4 5 6 7 8 9 10 11 12', vt)
+    screen_row(0, '1 2 3 4 5 6 7 8 9 10', screen, vt.cols)
+    screen_row(1, ' 11 12', screen, vt.cols)
+    lineinfo(1, { cont = true }, state)
+
+    -- Resize narrower: 3x10. The 26-char line needs 3 rows at 10 cols. Fits!
+    resize(3, 10, vt)
+    screen_row(0, '1 2 3 4 5 ', screen, vt.cols)
+    screen_row(1, '6 7 8 9 10', screen, vt.cols)
+    screen_row(2, ' 11 12', screen, vt.cols)
+    lineinfo(1, { cont = true }, state)
+    lineinfo(2, { cont = true }, state)
+  end)
+
+  itp('resize narrower then wider preserves all content', function()
+    local vt = init()
+    resize(3, 20, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    push('1 2 3 4 5 6 7 8 9 10 11 12', vt)
+    screen_row(0, '1 2 3 4 5 6 7 8 9 10', screen, vt.cols)
+    screen_row(1, ' 11 12', screen, vt.cols)
+
+    resize(3, 10, vt)
+    resize(3, 20, vt)
+
+    -- Content should be restored at 20 cols
+    screen_row(0, '1 2 3 4 5 6 7 8 9 10', screen, vt.cols)
+    screen_row(1, ' 11 12', screen, vt.cols)
+    lineinfo(1, { cont = true }, state)
+  end)
+
+  itp('resize wider reflows long line correctly', function()
+    local vt = init()
+    resize(3, 10, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    -- "1 2 3 4 5 6 7 8 9 10 11 12" at 10 cols wraps to 3 rows. All fit.
+    push('1 2 3 4 5 6 7 8 9 10 11 12', vt)
+
+    -- Resize wider: content should reflow to 1 row at 40 cols
+    resize(3, 40, vt)
+    screen_row(0, '1 2 3 4 5 6 7 8 9 10 11 12', screen, vt.cols)
+  end)
+
+  itp('scrollback reflow does not truncate wide rows popped at narrow width', function()
+    local vt = init()
+    resize(3, 20, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    push('12345678901234567890\r\n', vt)
+    push('AAAAAAAAAAAAAAAAAAAA\r\n', vt)
+    push('BBBBBBBBBBBBBBBBBBBB\r\n', vt)
+    push('CCCCCCCCCCCCCCCCCCCC', vt)
+    screen_row(0, 'AAAAAAAAAAAAAAAAAAAA', screen, vt.cols)
+
+    resize(1, 1, vt)
+    resize(100, 100, vt)
+    resize(3, 10, vt)
+    resize(3, 30, vt)
+
+    -- After round-trip, content preserved in chronological order
+    screen_row(0, 'AAAAAAAAAAAAAAAAAAAA', screen, vt.cols)
+    screen_row(1, 'BBBBBBBBBBBBBBBBBBBB', screen, vt.cols)
+    screen_row(2, 'CCCCCCCCCCCCCCCCCCCC', screen, vt.cols)
+  end)
+
+  itp('resize narrower preserves large wrapped line via scrollback', function()
+    local vt = init()
+    resize(5, 10, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    push('AAAAABBBBBCCCCCDDDDDEEEEEFFFFFGGGGGHHHHHIIIIIJJJJJ', vt)
+    screen_row(0, 'AAAAABBBBB', screen, vt.cols)
+    screen_row(4, 'IIIIIJJJJJ', screen, vt.cols)
+
+    resize(5, 5, vt)
+    lineinfo(0, { cont = true }, state)
+    resize(5, 50, vt)
+    screen_row(0, 'AAAAABBBBBCCCCCDDDDDEEEEEFFFFFGGGGGHHHHHIIIIIJJJJJ', screen, vt.cols)
+    lineinfo(0, {}, state)
+  end)
+
+  itp('resize wider reflows scrollback content from normal scrolling', function()
+    local vt = init()
+    -- 5 rows, 10 cols
+    resize(5, 10, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    -- Write 80 chars = 8 rows at 10 cols. Only 5 visible, 3 in scrollback.
+    local s = string.rep('A', 10) .. string.rep('B', 10)
+           .. string.rep('C', 10) .. string.rep('D', 10)
+           .. string.rep('E', 10) .. string.rep('F', 10)
+           .. string.rep('G', 10) .. string.rep('H', 10)
+    push(s, vt)
+
+    -- Screen shows last 5 rows: D,E,F,G,H. Scrollback has first 3: A,B,C
+    screen_row(0, 'DDDDDDDDDD', screen, vt.cols)
+    screen_row(4, 'HHHHHHHHHH', screen, vt.cols)
+
+    -- Resize wider: all 80 chars should merge back into one logical line.
+    resize(5, 40, vt)
+
+    screen_row(0, 'AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD', screen, vt.cols)
+    screen_row(1, 'EEEEEEEEEEFFFFFFFFFFGGGGGGGGGGHHHHHHHHHH', screen, vt.cols)
+    lineinfo(1, { cont = true }, state)
+  end)
+
+  itp('multiple separate logical lines survive extreme resize cycle', function()
+    local vt = init()
+    resize(5, 10, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    -- Three separate hard-wrapped lines (each fits in 1 row at 10 cols)
+    push('AAAAAAAAAA\r\nBBBBBBBBBB\r\nCCCCCCCCCC', vt)
+    screen_row(0, 'AAAAAAAAAA', screen, vt.cols)
+    screen_row(1, 'BBBBBBBBBB', screen, vt.cols)
+    screen_row(2, 'CCCCCCCCCC', screen, vt.cols)
+
+    -- Extreme resize: narrow then wide
+    resize(5, 3, vt)
+    resize(5, 10, vt)
+
+    -- All three lines should be preserved
+    screen_row(0, 'AAAAAAAAAA', screen, vt.cols)
+    screen_row(1, 'BBBBBBBBBB', screen, vt.cols)
+    screen_row(2, 'CCCCCCCCCC', screen, vt.cols)
+  end)
+
+  itp('double resize narrow then wider preserves content', function()
+    local vt = init()
+    resize(3, 20, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    push('12345678901234567890', vt)
+    screen_row(0, '12345678901234567890', screen, vt.cols)
+
+    -- Progressive narrowing: 20 -> 10 -> 5 -> 20
+    resize(3, 10, vt)
+    resize(3, 5, vt)
+    resize(3, 20, vt)
+
+    screen_row(0, '12345678901234567890', screen, vt.cols)
+  end)
+
+  itp('single character survives extreme resize', function()
+    local vt = init()
+    resize(3, 10, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    push('X', vt)
+    screen_row(0, 'X', screen, vt.cols)
+    cursor(0, 1, state)
+
+    resize(1, 1, vt)
+    resize(3, 10, vt)
+
+    screen_row(0, 'X', screen, vt.cols)
+  end)
+
+  itp('mixed hard and soft wrapped lines survive resize', function()
+    local vt = init()
+    resize(5, 10, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    -- First line: hard-wrapped (fits in 1 row)
+    -- Second line: soft-wrapped (15 chars wraps to 2 rows at 10 cols)
+    -- Third line: hard-wrapped
+    push('AAAAAAAAAA\r\nBBBBBBBBBBBBBBB\r\nCCCCC', vt)
+    screen_row(0, 'AAAAAAAAAA', screen, vt.cols)
+    screen_row(1, 'BBBBBBBBBB', screen, vt.cols)
+    screen_row(2, 'BBBBB', screen, vt.cols)
+    lineinfo(2, { cont = true }, state)
+    screen_row(3, 'CCCCC', screen, vt.cols)
+
+    -- Resize wider: soft-wrapped line should merge back
+    resize(5, 20, vt)
+    screen_row(0, 'AAAAAAAAAA', screen, vt.cols)
+    screen_row(1, 'BBBBBBBBBBBBBBB', screen, vt.cols)
+    screen_row(2, 'CCCCC', screen, vt.cols)
+  end)
+
+  itp('exact-width hard newlines preserve order across narrow roundtrip', function()
+    local vt = init()
+    resize(20, 80, vt)
+    local state = wantstate(vt)
+    local screen = wantscreen(vt, { b = true })
+    reset(state, screen)
+    screen = wantscreen(vt, { b = true, r = true })
+
+    local a = string.rep('A', 80)
+    local b = string.rep('B', 80)
+    local c = string.rep('C', 80)
+
+    push('$ /tmp/nvim-reflow-hard-1.sh\r\n' .. a .. '\r\n' .. b .. '\r\n' .. c .. '\r\n$ ', vt)
+    screen_row(0, '$ /tmp/nvim-reflow-hard-1.sh', screen, vt.cols)
+    screen_row(1, a, screen, vt.cols)
+    screen_row(2, b, screen, vt.cols)
+    screen_row(3, c, screen, vt.cols)
+    screen_row(4, '$ ', screen, vt.cols)
+
+    resize(10, 20, vt)
+    resize(20, 80, vt)
+
+    screen_row(0, '$ /tmp/nvim-reflow-hard-1.sh', screen, vt.cols)
+    screen_row(1, a, screen, vt.cols)
+    screen_row(2, b, screen, vt.cols)
+    screen_row(3, c, screen, vt.cols)
+    screen_row(4, '$ ', screen, vt.cols)
   end)
 
   pending('90vttest_01-movement-1', function() end)

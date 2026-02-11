@@ -162,6 +162,12 @@ static void scroll(VTermState *state, VTermRect rect, int downward, int rightwar
     rightward = -cols;
   }
 
+  // Notify screen layer before lineinfo is shifted, so it can save
+  // lineinfo for rows about to be pushed to scrollback.
+  if (state->callbacks && state->callbacks->pre_scrollrect) {
+    (*state->callbacks->pre_scrollrect)(rect, downward, rightward, state->cbdata);
+  }
+
   // Update lineinfo if full line
   if (rect.start_col == 0 && rect.end_col == state->cols && rightward == 0) {
     int height = rect.end_row - rect.start_row - abs(downward);

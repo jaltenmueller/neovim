@@ -9,6 +9,9 @@ typedef struct VTerm VTerm;
 typedef struct VTermState VTermState;
 typedef struct VTermScreen VTermScreen;
 
+// Forward declaration for use in callback types.
+typedef struct VTermLineInfo VTermLineInfo;
+
 typedef struct {
   int row;
   int col;
@@ -125,6 +128,14 @@ typedef struct {
   int (*sb_pushline)(int cols, const VTermScreenCell *cells, void *user);
   int (*sb_popline)(int cols, VTermScreenCell *cells, void *user);
   int (*sb_clear)(void *user);
+  // Extended pushline that includes lineinfo for continuation tracking.
+  // If set, this is called INSTEAD OF sb_pushline.
+  int (*sb_pushline_ex)(int cols, const VTermScreenCell *cells,
+                        const VTermLineInfo *lineinfo, void *user);
+  // Extended popline that returns lineinfo for continuation tracking.
+  // If set, this is called INSTEAD OF sb_popline.
+  int (*sb_popline_ex)(int cols, VTermScreenCell *cells,
+                       VTermLineInfo *lineinfo, int *cols_out, void *user);
 } VTermScreenCallbacks;
 
 typedef struct {
@@ -231,11 +242,11 @@ typedef struct {
   unsigned dhl:2;             // DECDHL double-height line (1=top 2=bottom)
 } VTermGlyphInfo;
 
-typedef struct {
+struct VTermLineInfo {
   unsigned doublewidth:1;     // DECDWL or DECDHL line
   unsigned doubleheight:2;    // DECDHL line (1=top 2=bottom)
   unsigned continuation:1;    // Line is a flow continuation of the previous
-} VTermLineInfo;
+};
 
 // Copies of VTermState fields that the 'resize' callback might have reason to edit. 'resize'
 // callback gets total control of these fields and may free-and-reallocate them if required. They
@@ -282,6 +293,9 @@ typedef struct {
   int (*setlineinfo)(int row, const VTermLineInfo *newinfo, const VTermLineInfo *oldinfo,
                      void *user);
   int (*sb_clear)(void *user);
+  // Called BEFORE lineinfo is shifted during scroll, allowing the screen
+  // layer to save lineinfo for rows about to be pushed to scrollback.
+  int (*pre_scrollrect)(VTermRect rect, int downward, int rightward, void *user);
 } VTermStateCallbacks;
 
 typedef struct {

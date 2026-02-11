@@ -501,25 +501,46 @@ int state_sb_clear(void *user)
 }
 
 bool want_screen_scrollback;
+
+// Real scrollback storage for testing reflow
+#define TEST_SB_MAX 200
+#define TEST_SB_COLS_MAX 256
+static struct {
+  VTermScreenCell cells[TEST_SB_COLS_MAX];
+  int cols;
+  bool continuation;
+} test_sb[TEST_SB_MAX];
+static int test_sb_count = 0;
+
 int screen_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
 {
   if (!want_screen_scrollback) {
     return 1;
   }
 
+  // Store in real scrollback (shift right to insert at [0])
+  if (test_sb_count < TEST_SB_MAX) {
+    memmove(&test_sb[1], &test_sb[0], sizeof(test_sb[0]) * (size_t)test_sb_count);
+    test_sb_count++;
+  } else {
+    memmove(&test_sb[1], &test_sb[0], sizeof(test_sb[0]) * (size_t)(TEST_SB_MAX - 1));
+  }
+  int store_cols = cols < TEST_SB_COLS_MAX ? cols : TEST_SB_COLS_MAX;
+  memcpy(test_sb[0].cells, cells, sizeof(VTermScreenCell) * (size_t)store_cols);
+  test_sb[0].cols = store_cols;
+  test_sb[0].continuation = false;
+
+  FILE *f = fopen(VTERM_TEST_FILE, "a");
   int eol = cols;
   while (eol && !cells[eol - 1].schar) {
     eol--;
   }
-
-  FILE *f = fopen(VTERM_TEST_FILE, "a");
   fprintf(f, "sb_pushline %d =", cols);
   for (int c = 0; c < eol; c++) {
     fprintf(f, " ");
     print_schar(f, cells[c].schar);
   }
   fprintf(f, "\n");
-
   fclose(f);
 
   return 1;
@@ -527,20 +548,85 @@ int screen_sb_pushline(int cols, const VTermScreenCell *cells, void *user)
 
 int screen_sb_popline(int cols, VTermScreenCell *cells, void *user)
 {
-  if (!want_screen_scrollback) {
+  if (!want_screen_scrollback || test_sb_count == 0) {
     return 0;
   }
 
-  // All lines of scrollback contain "ABCDE"
-  for (int col = 0; col < cols; col++) {
-    if (col < 5) {
-      cells[col].schar = schar_from_ascii((uint32_t)('A' + col));
-    } else {
-      cells[col].schar = 0;
-    }
-
+  int copy_cols = cols < test_sb[0].cols ? cols : test_sb[0].cols;
+  memcpy(cells, test_sb[0].cells, sizeof(VTermScreenCell) * (size_t)copy_cols);
+  for (int col = copy_cols; col < cols; col++) {
+    cells[col].schar = 0;
     cells[col].width = 1;
   }
+
+  test_sb_count--;
+  memmove(&test_sb[0], &test_sb[1], sizeof(test_sb[0]) * (size_t)test_sb_count);
+
+  FILE *f = fopen(VTERM_TEST_FILE, "a");
+  fprintf(f, "sb_popline %d\n", cols);
+  fclose(f);
+  return 1;
+}
+
+int screen_sb_pushline_ex(int cols, const VTermScreenCell *cells,
+                          const VTermLineInfo *lineinfo, void *user)
+{
+  if (!want_screen_scrollback) {
+    return 1;
+  }
+
+  // Store in real scrollback (shift right to insert at [0])
+  if (test_sb_count < TEST_SB_MAX) {
+    memmove(&test_sb[1], &test_sb[0], sizeof(test_sb[0]) * (size_t)test_sb_count);
+    test_sb_count++;
+  } else {
+    memmove(&test_sb[1], &test_sb[0], sizeof(test_sb[0]) * (size_t)(TEST_SB_MAX - 1));
+  }
+  int store_cols = cols < TEST_SB_COLS_MAX ? cols : TEST_SB_COLS_MAX;
+  memcpy(test_sb[0].cells, cells, sizeof(VTermScreenCell) * (size_t)store_cols);
+  test_sb[0].cols = store_cols;
+  test_sb[0].continuation = lineinfo ? lineinfo->continuation : false;
+
+  FILE *f = fopen(VTERM_TEST_FILE, "a");
+  int eol = cols;
+  while (eol && !cells[eol - 1].schar) {
+    eol--;
+  }
+  fprintf(f, "sb_pushline %d =", cols);
+  for (int c = 0; c < eol; c++) {
+    fprintf(f, " ");
+    print_schar(f, cells[c].schar);
+  }
+  fprintf(f, "\n");
+  fclose(f);
+
+  return 1;
+}
+
+int screen_sb_popline_ex(int cols, VTermScreenCell *cells,
+                         VTermLineInfo *lineinfo, int *cols_out, void *user)
+{
+  if (!want_screen_scrollback || test_sb_count == 0) {
+    return 0;
+  }
+
+  int copy_cols = cols < test_sb[0].cols ? cols : test_sb[0].cols;
+  memcpy(cells, test_sb[0].cells, sizeof(VTermScreenCell) * (size_t)copy_cols);
+  for (int col = copy_cols; col < cols; col++) {
+    cells[col].schar = 0;
+    cells[col].width = 1;
+  }
+
+  if (lineinfo) {
+    *lineinfo = (VTermLineInfo){ 0 };
+    lineinfo->continuation = test_sb[0].continuation ? 1 : 0;
+  }
+  if (cols_out) {
+    *cols_out = test_sb[0].cols;
+  }
+
+  test_sb_count--;
+  memmove(&test_sb[0], &test_sb[1], sizeof(test_sb[0]) * (size_t)test_sb_count);
 
   FILE *f = fopen(VTERM_TEST_FILE, "a");
   fprintf(f, "sb_popline %d\n", cols);
@@ -550,6 +636,9 @@ int screen_sb_popline(int cols, VTermScreenCell *cells, void *user)
 
 int screen_sb_clear(void *user)
 {
+  // Always clear the real scrollback storage
+  test_sb_count = 0;
+
   if (!want_screen_scrollback) {
     return 1;
   }

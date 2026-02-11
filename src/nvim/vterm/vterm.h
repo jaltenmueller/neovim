@@ -155,5 +155,10 @@ struct VTermScreen {
   // buffer for a single screen row used in scrollback storage callbacks
   VTermScreenCell *sb_buffer;
 
+  // Saved lineinfo for rows about to be pushed to scrollback.
+  // Populated by pre_scrollrect before lineinfo is shifted.
+  VTermLineInfo *pending_sb_lineinfo;
+  int pending_sb_lineinfo_count;
+
   ScreenPen pen;
 };
